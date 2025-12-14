@@ -1,0 +1,70 @@
+name: ci-cd
+
+on:
+  push:
+    branches: ["main"]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: ${{ secrets.GCP_REGION }}          # us-central1
+  GAR_REPO: ${{ secrets.GAR_REPO }}          # heart-repo
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}    # your cluster name
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}          # us-central1-a
+  IMAGE_NAME: heart-api
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to GCP (Service Account JSON)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+
+      - name: Build & Push Docker image
+        run: |
+          TAG=${GITHUB_SHA::7}
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$IMAGE_NAME:$TAG"
+
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials "$GKE_CLUSTER" \
+            --zone "$GKE_ZONE" \
+            --project "$PROJECT_ID"
+
+      - name: Deploy Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/hpa.yaml
+
+      - name: Rolling update to new image
+        run: |
+          # Deployment name: heart-api
+          # Container name: heart-api
+          kubectl set image deployment/heart-api heart-api="$IMAGE"
+          kubectl rollout status deployment/heart-api --timeout=180s
+
+      - name: Show status
+        run: |
+          kubectl get deploy heart-api
+          kubectl get pods -l app=heart-api
+          kubectl get hpa
+          kubectl get svc
+
